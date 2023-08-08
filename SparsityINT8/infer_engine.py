@@ -23,9 +23,11 @@ from train_utils import data_loading
 
 import tensorrt as trt
 import pycuda.driver as cuda
+
 cuda.init()
 
 import sys
+
 sys.path.append("./vision/references/classification/")
 try:
     import utils as utils_vision
@@ -92,7 +94,7 @@ def infer(
     engine_path: str,
     val_batches: torch.utils.data.DataLoader,
     batch_size: int = 8,
-    log_file: str = "engine_accuracy.log"
+    log_file: str = "engine_accuracy.log",
 ) -> None:
     """
     Performs inference in TensorRT engine.
@@ -110,15 +112,11 @@ def infer(
     def override_shape(shape: tuple) -> tuple:
         """Overrides batch dimension if dynamic."""
         if TRT_DYNAMIC_DIM in shape:
-            shape = tuple(
-                [batch_size if dim == TRT_DYNAMIC_DIM else dim for dim in shape]
-            )
+            shape = tuple([batch_size if dim == TRT_DYNAMIC_DIM else dim for dim in shape])
         return shape
 
     # Open engine as runtime
-    with open(engine_path, "rb") as f, trt.Runtime(
-        trt.Logger(trt.Logger.ERROR)
-    ) as runtime:
+    with open(engine_path, "rb") as f, trt.Runtime(trt.Logger(trt.Logger.ERROR)) as runtime:
         engine = runtime.deserialize_cuda_engine(f.read())
 
         ctx = cuda.Context.attach()
@@ -165,9 +163,7 @@ def infer(
                     pagelocked_buffer = inputs[0].host
                     np.copyto(pagelocked_buffer, data)
                 except RuntimeError:
-                    raise RuntimeError(
-                        "Failed to load images in Host at step {}".format(step)
-                    )
+                    raise RuntimeError("Failed to load images in Host at step {}".format(step))
 
                 inp = inputs[0]
                 # Transfer input data from Host to Device (GPU)
@@ -198,38 +194,78 @@ def infer(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run inference on TensorRT engines for Imagenet-based Classification models.")
+    parser = argparse.ArgumentParser(
+        description="Run inference on TensorRT engines for Imagenet-based Classification models."
+    )
     parser.add_argument("-e", "--engine", type=str, default="", help="Path to TensorRT engine")
-    parser.add_argument("-d", "--data_dir", default="/media/Data/imagenet_data", type=str,
-                        help="Path to directory of input images (val data).")
-    parser.add_argument("-b", "--batch_size", default=1, type=int,
-                        help="Number of inputs to send in parallel (up to max batch size of engine).")
+    parser.add_argument(
+        "-d",
+        "--data_dir",
+        default="/media/Data/imagenet_data",
+        type=str,
+        help="Path to directory of input images (val data).",
+    )
+    parser.add_argument(
+        "-b",
+        "--batch_size",
+        default=1,
+        type=int,
+        help="Number of inputs to send in parallel (up to max batch size of engine).",
+    )
     parser.add_argument("--log_file", type=str, default="engine_accuracy.log", help="Filename to save logs.")
-    parser.add_argument('--val_data_size', type=int, default=None,
-                        help='Indicates how much validation data should be used for accuracy eval. '
-                             'If None, use all. Otherwise, use a subset.')
+    parser.add_argument(
+        "--val_data_size",
+        type=int,
+        default=None,
+        help="Indicates how much validation data should be used for accuracy eval. "
+        "If None, use all. Otherwise, use a subset.",
+    )
     # Dataloader arguments from 'vision' repo
-    parser.add_argument("--cache-dataset", dest="cache_dataset", action="store_true",
-                        help="Cache the datasets for quicker initialization. It also serializes the transforms")
+    parser.add_argument(
+        "--cache-dataset",
+        dest="cache_dataset",
+        action="store_true",
+        help="Cache the datasets for quicker initialization. It also serializes the transforms",
+    )
     parser.add_argument("--test-only", dest="test_only", action="store_true", help="Only test the model")
     parser.add_argument("--auto-augment", default=None, type=str, help="auto augment policy (default: None)")
     parser.add_argument("--ra-magnitude", default=9, type=int, help="magnitude of auto augment policy")
     parser.add_argument("--augmix-severity", default=3, type=int, help="severity of augmix policy")
     parser.add_argument("--random-erase", default=0.0, type=float, help="random erasing probability (default: 0.0)")
-    parser.add_argument("--interpolation", default="bilinear", type=str,
-                        help="the interpolation method (default: bilinear)")
-    parser.add_argument("--val-resize-size", default=256, type=int,
-                        help="the resize size used for validation (default: 256)")
-    parser.add_argument("--val-crop-size", default=224, type=int,
-                        help="the central crop size used for validation (default: 224)")
-    parser.add_argument("--train-crop-size", default=224, type=int,
-                        help="the random crop size used for training (default: 224)")
+    parser.add_argument(
+        "--interpolation",
+        default="bilinear",
+        type=str,
+        help="the interpolation method (default: bilinear)",
+    )
+    parser.add_argument(
+        "--val-resize-size",
+        default=256,
+        type=int,
+        help="the resize size used for validation (default: 256)",
+    )
+    parser.add_argument(
+        "--val-crop-size",
+        default=224,
+        type=int,
+        help="the central crop size used for validation (default: 224)",
+    )
+    parser.add_argument(
+        "--train-crop-size",
+        default=224,
+        type=int,
+        help="the random crop size used for training (default: 224)",
+    )
     parser.add_argument("--ra-sampler", action="store_true", help="whether to use Repeated Augmentation in training")
-    parser.add_argument("--ra-reps", default=3, type=int,
-                        help="number of repetitions for Repeated Augmentation (default: 3)")
+    parser.add_argument(
+        "--ra-reps",
+        default=3,
+        type=int,
+        help="number of repetitions for Repeated Augmentation (default: 3)",
+    )
     parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
     parser.add_argument("--dist-url", default="env://", type=str, help="url used to set up distributed training")
-    
+
     args = parser.parse_args()
 
     utils_vision.init_distributed_mode(args)
@@ -242,8 +278,12 @@ if __name__ == "__main__":
     # Load the test data and pre-process input
     print("---------- Loading data ----------")
     _, _, val_batches = data_loading(
-        args.data_dir, args.batch_size, args,
-        train_data_size=1, test_data_size=1, val_data_size=args.val_data_size
+        args.data_dir,
+        args.batch_size,
+        args,
+        train_data_size=1,
+        test_data_size=1,
+        val_data_size=args.val_data_size,
     )
 
     # Perform inference

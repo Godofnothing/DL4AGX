@@ -62,6 +62,7 @@ import copy
 import os
 import sys
 import time
+import timm
 import torch
 import torch.utils.data
 from torch import nn
@@ -95,9 +96,10 @@ from pytorch_quantization import calib
 import tqdm
 
 
-def prune_trained_model_custom(model, optimizer, allow_recompute_mask=False, allow_permutation=True,
-                               compute_sparse_masks=True):
-    """ Adds mask buffers to model (init_model_for_pruning), augments optimize, and computes masks if .
+def prune_trained_model_custom(
+    model, optimizer, allow_recompute_mask=False, allow_permutation=True, compute_sparse_masks=True
+):
+    """Adds mask buffers to model (init_model_for_pruning), augments optimize, and computes masks if .
     Source: https://github.com/NVIDIA/apex/blob/52c512803ba0a629b58e1c1d1b190b4172218ecd/apex/contrib/sparsity/asp.py#L299
     Modifications:
       1) Abstracted 'allow_recompute_mask' and 'allow_permutation' arguments
@@ -110,7 +112,7 @@ def prune_trained_model_custom(model, optimizer, allow_recompute_mask=False, all
         verbosity=2,
         whitelist=[torch.nn.Linear, torch.nn.Conv2d],
         allow_recompute_mask=allow_recompute_mask,
-        allow_permutation=allow_permutation
+        allow_permutation=allow_permutation,
     )
     asp.init_optimizer_for_pruning(optimizer)
     if compute_sparse_masks:
@@ -118,10 +120,20 @@ def prune_trained_model_custom(model, optimizer, allow_recompute_mask=False, all
     return asp
 
 
-def data_loading(data_path, batch_size, torchvision_args, train_data_size=None, test_data_size=None, val_data_size=None,
-                 distributed=False, drop_last=False):
-    traindir = os.path.join(data_path, 'train')
-    valdir = os.path.join(data_path, 'val')
+def data_loading(
+    data_path,
+    batch_size,
+    torchvision_args,
+    train_data_size=None,
+    test_data_size=None,
+    val_data_size=None,
+    distributed=False,
+    drop_last=False,
+    num_workers=0,
+    pin_memory=False,
+):
+    traindir = os.path.join(data_path, "train")
+    valdir = os.path.join(data_path, "val")
     dataset, dataset_test, train_sampler, test_sampler = load_data(traindir, valdir, torchvision_args)
     dataset_val = copy.deepcopy(dataset_test)
     val_sampler = copy.deepcopy(test_sampler)
@@ -148,46 +160,85 @@ def data_loading(data_path, batch_size, torchvision_args, train_data_size=None, 
 
     # Make dataloader
     train_data_loader = torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size,
-        sampler=train_sampler, drop_last=drop_last)
+        dataset,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        drop_last=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
 
     test_data_loader = torch.utils.data.DataLoader(
-        dataset_test, batch_size=batch_size,
-        sampler=test_sampler, drop_last=drop_last)
+        dataset_test,
+        batch_size=batch_size,
+        sampler=test_sampler,
+        drop_last=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
 
     val_data_loader = torch.utils.data.DataLoader(
-        dataset_val, batch_size=batch_size,
-        sampler=val_sampler, drop_last=drop_last)
+        dataset_val,
+        batch_size=batch_size,
+        sampler=val_sampler,
+        drop_last=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
 
     return train_data_loader, test_data_loader, val_data_loader
 
 
 def eval_baseline(args, criterion, data_loader_test):
-    model = models.__dict__[args.model_name](pretrained=True)
+    if args.model_name.startswith('timm'):
+        _, model_name = args.model_name.split('/')
+        model = timm.create_model(model_name, pretrained=True)
+    else:
+        model = models.__dict__[args.model_name](pretrained=True)
     model.to(args.device)
 
     acc1, acc5, loss = None, None, None
     if args.eval_baseline:
         print("---------- Evaluating baseline model ----------")
         with torch.no_grad():
-            acc1, acc5, loss = evaluate(model, criterion, data_loader_test, device=args.device, print_freq=args.print_freq)
+            acc1, acc5, loss = evaluate(
+                model, criterion, data_loader_test, device=args.device, print_freq=args.print_freq
+            )
 
     if args.save_baseline:
         ckpt_path = os.path.join(args.output_dir, "baseline.pth")
-        torch.save({
-            'model_state_dict': model.state_dict(),
-            "acc1_val": acc1,
-            "acc5_val": acc5,
-            "loss_val": loss,
-            'args': args
-        }, ckpt_path)
-        export_onnx(model, ckpt_path.replace(".pth", ".onnx"), args.batch_size, val_crop_size=args.val_crop_size)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "acc1_val": acc1,
+                "acc5_val": acc5,
+                "loss_val": loss,
+                "args": args,
+            },
+            ckpt_path,
+        )
+        export_onnx(
+            model,
+            ckpt_path.replace(".pth", ".onnx"),
+            args.batch_size,
+            val_crop_size=args.val_crop_size,
+        )
 
     return model, acc1, acc5
 
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, steps_per_epoch=None,
-                    model_ema=None, scaler=None):
+def train_one_epoch(
+    model,
+    criterion,
+    optimizer,
+    data_loader,
+    device,
+    epoch,
+    args,
+    steps_per_epoch=None,
+    model_ema=None,
+    scaler=None,
+):
     """
     Codebase: torch/vision/references/classification/train.py
     Modification: added steps_per_epoch.
@@ -237,23 +288,47 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
     return metric_logger
 
 
-def train_loop(model, model_without_ddp, criterion, optimizer, data_loader, data_loader_val, device, epoch, args, summary_writer_dir,
-               save_ckpt_path, steps_per_epoch=None, model_ema=None, scaler=None, lr_scheduler=None, opset=13):
+def train_loop(
+    model,
+    model_without_ddp,
+    criterion,
+    optimizer,
+    data_loader,
+    data_loader_val,
+    device,
+    epoch,
+    args,
+    summary_writer_dir,
+    save_ckpt_path,
+    steps_per_epoch=None,
+    model_ema=None,
+    scaler=None,
+    lr_scheduler=None,
+    opset=13,
+):
     def _save_model(ep, ckpt_path, acc1_val, acc5_val, current_val_loss):
-        torch.save({
-            'epoch': ep,
-            'model_state_dict': model_without_ddp.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'lr_scheduler_state_dict': lr_scheduler.state_dict() if lr_scheduler is not None else None,  # ADDED
-            'loss': criterion,
-            "acc1_val": acc1_val,
-            "acc5_val": acc5_val,
-            "loss_val": current_val_loss,
-            'args': args  # ADDED
-        }, ckpt_path)
+        torch.save(
+            {
+                "epoch": ep,
+                "model_state_dict": model_without_ddp.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "lr_scheduler_state_dict": lr_scheduler.state_dict() if lr_scheduler is not None else None,  # ADDED
+                "loss": criterion,
+                "acc1_val": acc1_val,
+                "acc5_val": acc5_val,
+                "loss_val": current_val_loss,
+                "args": args,  # ADDED
+            },
+            ckpt_path,
+        )
         # Export to ONNX
-        export_onnx(model_without_ddp, ckpt_path.replace(".pth", ".onnx"), args.batch_size,
-                    val_crop_size=args.val_crop_size, opset_version=opset)
+        export_onnx(
+            model_without_ddp,
+            ckpt_path.replace(".pth", ".onnx"),
+            args.onnx_batch_size,
+            val_crop_size=args.val_crop_size,
+            opset_version=opset,
+        )
 
     summary_writer = SummaryWriter(summary_writer_dir)
     best_val_loss = float("inf")
@@ -265,8 +340,16 @@ def train_loop(model, model_without_ddp, criterion, optimizer, data_loader, data
             data_loader.sampler.set_epoch(e)
             torch.distributed.barrier()
         metric_logger = train_one_epoch(
-            model, criterion, optimizer, data_loader, device, e, args, steps_per_epoch=steps_per_epoch,
-            model_ema=model_ema, scaler=scaler
+            model,
+            criterion,
+            optimizer,
+            data_loader,
+            device,
+            e,
+            args,
+            steps_per_epoch=steps_per_epoch,
+            model_ema=model_ema,
+            scaler=scaler,
         )
         if lr_scheduler is not None:
             lr_scheduler.step()
@@ -293,7 +376,13 @@ def train_loop(model, model_without_ddp, criterion, optimizer, data_loader, data
         summary_writer.add_scalar("Accuracy_top5_val/epoch", acc5_val, e)
 
         # Save the FINAL model
-        _save_model(e, save_ckpt_path.replace("_best.pth", "_final.pth"), acc1_val, acc5_val, current_val_loss)
+        _save_model(
+            e,
+            save_ckpt_path.replace("_best.pth", "_final.pth"),
+            acc1_val,
+            acc5_val,
+            current_val_loss,
+        )
 
     tock = time.time()
     time_min = (tock - tick) / (1000 * 60)
@@ -347,14 +436,28 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
 
     metric_logger.synchronize_between_processes()
 
-    print(f"{header} Acc@1 {metric_logger.acc1.global_avg:.3f},"
-          f" Acc@5 {metric_logger.acc5.global_avg:.3f},"
-          f" loss {metric_logger.loss.global_avg:.5f}")
-    return metric_logger.acc1.global_avg, metric_logger.acc5.global_avg, metric_logger.loss.global_avg
+    print(
+        f"{header} Acc@1 {metric_logger.acc1.global_avg:.3f},"
+        f" Acc@5 {metric_logger.acc5.global_avg:.3f},"
+        f" loss {metric_logger.loss.global_avg:.5f}"
+    )
+    return (
+        metric_logger.acc1.global_avg,
+        metric_logger.acc5.global_avg,
+        metric_logger.loss.global_avg,
+    )
 
 
-def export_onnx(model, onnx_filename, batch_onnx, val_crop_size=224, opset_version=13, verbose=False,
-                do_constant_folding=True, trace_model=False):
+def export_onnx(
+    model,
+    onnx_filename,
+    batch_onnx,
+    val_crop_size=224,
+    opset_version=13,
+    verbose=False,
+    do_constant_folding=True,
+    trace_model=False,
+):
     model.eval()
     # We have to shift to pytorch's fake quant ops before exporting the model to ONNX
     quant_nn.TensorQuantizer.use_fb_fake_quant = True
@@ -363,7 +466,11 @@ def export_onnx(model, onnx_filename, batch_onnx, val_crop_size=224, opset_versi
     print("Creating ONNX file: " + onnx_filename)
     dummy_input = torch.randn(batch_onnx, 3, val_crop_size, val_crop_size, device="cuda")
     try:
-        print("Exporting ONNX model with input {} to {} with opset {}!".format(dummy_input.shape, onnx_filename, opset_version))
+        print(
+            "Exporting ONNX model with input {} to {} with opset {}!".format(
+                dummy_input.shape, onnx_filename, opset_version
+            )
+        )
         model_tmp = model
         if isinstance(model, torch.nn.DataParallel) or isinstance(model, torch.nn.parallel.DistributedDataParallel):
             #  '.module' is necessary here because model is wrapped in torch.nn.DataParallel
@@ -371,10 +478,12 @@ def export_onnx(model, onnx_filename, batch_onnx, val_crop_size=224, opset_versi
         if trace_model:
             model_tmp = torch.jit.trace(model_tmp, dummy_input)
         torch.onnx.export(
-            model_tmp, dummy_input, onnx_filename,
+            model_tmp,
+            dummy_input,
+            onnx_filename,
             verbose=verbose,
             opset_version=opset_version,
-            do_constant_folding=do_constant_folding
+            do_constant_folding=do_constant_folding,
         )
     except ValueError:
         print("Failed to export to ONNX")
@@ -390,7 +499,7 @@ def get_optimizer(args, parameters):
             parameters,
             lr=args.sparse_lr,
             momentum=args.sparse_momentum,
-            weight_decay=args.sparse_weight_decay
+            weight_decay=args.sparse_weight_decay,
         )
     elif opt_name == "rmsprop":
         optimizer = torch.optim.RMSprop(
@@ -399,14 +508,10 @@ def get_optimizer(args, parameters):
             momentum=args.sparse_momentum,
             weight_decay=args.sparse_weight_decay,
             eps=0.0316,
-            alpha=0.9
+            alpha=0.9,
         )
     elif opt_name == "adamw":
-        optimizer = torch.optim.AdamW(
-            parameters,
-            lr=args.sparse_lr,
-            weight_decay=args.sparse_weight_decay
-        )
+        optimizer = torch.optim.AdamW(parameters, lr=args.sparse_lr, weight_decay=args.sparse_weight_decay)
     else:
         raise RuntimeError(f"Invalid optimizer {args.opt}. Only SGD, RMSprop and AdamW are supported.")
 
@@ -421,11 +526,7 @@ def get_lr_scheduler(args, optimizer):
             optimizer, factor=args.lr_warmup_decay, total_iters=args.sparse_epoch
         )
     elif args.lr_scheduler == "step":
-        main_lr_scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer,
-            step_size=args.lr_step_size,
-            gamma=args.lr_gamma
-        )
+        main_lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
         if args.lr_warmup_epochs > 0:
             warmup_lr_scheduler = torch.optim.lr_scheduler.ConstantLR(
                 optimizer, factor=args.lr_warmup_decay, total_iters=args.lr_warmup_epochs
@@ -433,7 +534,7 @@ def get_lr_scheduler(args, optimizer):
             lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
                 optimizer,
                 schedulers=[warmup_lr_scheduler, main_lr_scheduler],
-                milestones=[args.lr_warmup_epochs]
+                milestones=[args.lr_warmup_epochs],
             )
         else:
             lr_scheduler = main_lr_scheduler
@@ -457,7 +558,7 @@ def collect_stats(model, data_loader, num_batches):
             else:
                 module.disable()
 
-    progress_bar = tqdm.tqdm(total=len(data_loader), leave=True, desc='Evaluation Progress')
+    progress_bar = tqdm.tqdm(total=len(data_loader), leave=True, desc="Evaluation Progress")
     for i, (image, _) in enumerate(data_loader):
         model(image.to(torch.device("cuda:0")))  # .cuda())
         progress_bar.update()

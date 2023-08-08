@@ -29,6 +29,7 @@ from argparse import ArgumentParser
 from train_utils import data_loading
 
 import sys
+
 sys.path.append("./vision/references/classification/")
 try:
     import utils as utils_vision
@@ -36,8 +37,14 @@ except ImportError:
     print("Error importing pytorch's vision repository!")
 
 from infer_engine import infer
-from polygraphy.backend.trt import Calibrator, CreateConfig, EngineFromNetwork, NetworkFromOnnxPath, \
-    TrtRunner, SaveEngine
+from polygraphy.backend.trt import (
+    Calibrator,
+    CreateConfig,
+    EngineFromNetwork,
+    NetworkFromOnnxPath,
+    TrtRunner,
+    SaveEngine,
+)
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -45,39 +52,97 @@ from polygraphy.logger import G_LOGGER
 import tensorrt as trt
 
 
-ARGPARSER = ArgumentParser('This script calibrates an ONNX model and generates a calibration cache and a quantized TRT engine for deployment.')
-ARGPARSER.add_argument('--onnx_path', type=str, default="./model.onnx")
-ARGPARSER.add_argument('--output_dir', '-o', type=str, default='./converted',
-                       help='Output directory to save the ONNX file with appropriate batch size.')
-ARGPARSER.add_argument('--batch_size', '-b', type=int, default=128, help='Batch size for calibration')
-ARGPARSER.add_argument('--calibrator_type', '-c', type=str, default='entropy',
-                       help='Options={entropy (trt.IInt8EntropyCalibrator2), minmax (trt.IInt8MinMaxCalibrator)}')
-ARGPARSER.add_argument('--onnx_input_name', type=str, default="input.1", help='Input tensor name in ONNX file.')
-ARGPARSER.add_argument("--is_dense_calibration", dest="is_dense_calibration", action="store_true",
-                       help="True if we should activate Dense QAT training instead of Sparse.")
+ARGPARSER = ArgumentParser(
+    "This script calibrates an ONNX model and generates a calibration cache and a quantized TRT engine for deployment."
+)
+ARGPARSER.add_argument("--onnx_path", type=str, default="./model.onnx")
+ARGPARSER.add_argument(
+    "--output_dir",
+    "-o",
+    type=str,
+    default="./converted",
+    help="Output directory to save the ONNX file with appropriate batch size.",
+)
+ARGPARSER.add_argument("--batch_size", "-b", type=int, default=128, help="Batch size for calibration")
+ARGPARSER.add_argument(
+    "--calibrator_type",
+    "-c",
+    type=str,
+    default="entropy",
+    help="Options={entropy (trt.IInt8EntropyCalibrator2), minmax (trt.IInt8MinMaxCalibrator)}",
+)
+ARGPARSER.add_argument("--onnx_input_name", type=str, default="input.1", help="Input tensor name in ONNX file.")
+ARGPARSER.add_argument(
+    "--is_dense_calibration",
+    dest="is_dense_calibration",
+    action="store_true",
+    help="True if we should activate Dense QAT training instead of Sparse.",
+)
 # Dataloader
-ARGPARSER.add_argument('--data_dir', '-d', type=str, default='/media/Data/imagenet_data',
-                       help='Directory containing the tfrecords data.')
-ARGPARSER.add_argument("--test_data_size", type=int, default=None,
-                       help='Indicates how much validation data should be used for accuracy evaluation.'
-                            'If None, use all. Otherwise, use a subset.')
-ARGPARSER.add_argument('--calib_data_size', type=int, default=None,
-                       help='Indicates how much validation data should be used for calibration.'
-                            'If None, use all. Otherwise, use a subset.')
+ARGPARSER.add_argument(
+    "--data_dir",
+    "-d",
+    type=str,
+    default="/media/Data/imagenet_data",
+    help="Directory containing the tfrecords data.",
+)
+ARGPARSER.add_argument(
+    "--test_data_size",
+    type=int,
+    default=None,
+    help="Indicates how much validation data should be used for accuracy evaluation."
+    "If None, use all. Otherwise, use a subset.",
+)
+ARGPARSER.add_argument(
+    "--calib_data_size",
+    type=int,
+    default=None,
+    help="Indicates how much validation data should be used for calibration."
+    "If None, use all. Otherwise, use a subset.",
+)
 # Dataloader arguments from 'vision' repo
-ARGPARSER.add_argument("--cache-dataset", dest="cache_dataset", action="store_true",
-                       help="Cache the datasets for quicker initialization. It also serializes the transforms",)
+ARGPARSER.add_argument(
+    "--cache-dataset",
+    dest="cache_dataset",
+    action="store_true",
+    help="Cache the datasets for quicker initialization. It also serializes the transforms",
+)
 ARGPARSER.add_argument("--test-only", dest="test_only", action="store_true", help="Only test the model")
 ARGPARSER.add_argument("--auto-augment", default=None, type=str, help="auto augment policy (default: None)")
 ARGPARSER.add_argument("--ra-magnitude", default=9, type=int, help="magnitude of auto augment policy")
 ARGPARSER.add_argument("--augmix-severity", default=3, type=int, help="severity of augmix policy")
 ARGPARSER.add_argument("--random-erase", default=0.0, type=float, help="random erasing probability (default: 0.0)")
-ARGPARSER.add_argument("--interpolation", default="bilinear", type=str, help="the interpolation method (default: bilinear)")
-ARGPARSER.add_argument("--val-resize-size", default=256, type=int, help="the resize size used for validation (default: 256)")
-ARGPARSER.add_argument("--val-crop-size", default=224, type=int, help="the central crop size used for validation (default: 224)")
-ARGPARSER.add_argument("--train-crop-size", default=224, type=int, help="the random crop size used for training (default: 224)")
+ARGPARSER.add_argument(
+    "--interpolation",
+    default="bilinear",
+    type=str,
+    help="the interpolation method (default: bilinear)",
+)
+ARGPARSER.add_argument(
+    "--val-resize-size",
+    default=256,
+    type=int,
+    help="the resize size used for validation (default: 256)",
+)
+ARGPARSER.add_argument(
+    "--val-crop-size",
+    default=224,
+    type=int,
+    help="the central crop size used for validation (default: 224)",
+)
+ARGPARSER.add_argument(
+    "--train-crop-size",
+    default=224,
+    type=int,
+    help="the random crop size used for training (default: 224)",
+)
 ARGPARSER.add_argument("--ra-sampler", action="store_true", help="whether to use Repeated Augmentation in training")
-ARGPARSER.add_argument("--ra-reps", default=3, type=int, help="number of repetitions for Repeated Augmentation (default: 3)")
+ARGPARSER.add_argument(
+    "--ra-reps",
+    default=3,
+    type=int,
+    help="number of repetitions for Repeated Augmentation (default: 3)",
+)
 ARGPARSER.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
 ARGPARSER.add_argument("--dist-url", default="env://", type=str, help="url used to set up distributed training")
 
@@ -103,14 +168,28 @@ def main(args):
     input_shape[0] = args.batch_size
 
     import subprocess as sp
-    sp.run(["polygraphy", "surgeon", "sanitize", args.onnx_path, "-o", new_onnx_path, "--override-input-shapes",
-            "{}:{}".format(graph.inputs[0].name, str(input_shape))])
+
+    sp.run(
+        [
+            "polygraphy",
+            "surgeon",
+            "sanitize",
+            args.onnx_path,
+            "-o",
+            new_onnx_path,
+            "--override-input-shapes",
+            "{}:{}".format(graph.inputs[0].name, str(input_shape)),
+        ]
+    )
 
     # ======== Load data ========
     print("---------- Loading data ----------")
     _, data_loader_test, data_loader_calib = data_loading(
-        args.data_dir, args.batch_size, args,
-        test_data_size=args.test_data_size, val_data_size=args.calib_data_size
+        args.data_dir,
+        args.batch_size,
+        args,
+        test_data_size=args.test_data_size,
+        val_data_size=args.calib_data_size,
     )
 
     # ======== TensorRT Deployment ========
@@ -119,23 +198,24 @@ def main(args):
     print("CALIBRATOR = {}".format(args.calibrator_type))
     if args.calibrator_type == "entropy":
         # This is the default calibrator (BaseClass=trt.IInt8EntropyCalibrator2)
-        calibrator = Calibrator(data_loader=calib_data(data_loader_calib, args.onnx_input_name),
-                                cache=calibration_cache_path)
+        calibrator = Calibrator(
+            data_loader=calib_data(data_loader_calib, args.onnx_input_name),
+            cache=calibration_cache_path,
+        )
     elif args.calibrator_type == "minmax":
-        calibrator = Calibrator(data_loader=calib_data(data_loader_calib, args.onnx_input_name),
-                                cache=calibration_cache_path, BaseClass=trt.IInt8MinMaxCalibrator)
+        calibrator = Calibrator(
+            data_loader=calib_data(data_loader_calib, args.onnx_input_name),
+            cache=calibration_cache_path,
+            BaseClass=trt.IInt8MinMaxCalibrator,
+        )
     else:
-        raise("Calibrator of type {} not supported!".format(args.calibrator_type))
+        raise ("Calibrator of type {} not supported!".format(args.calibrator_type))
 
     # Build engine from ONNX model by enabling INT8 and sparsity weights, and providing the calibrator.
     print("Sparse: {}".format(not args.is_dense_calibration))
     build_engine = EngineFromNetwork(
         NetworkFromOnnxPath(new_onnx_path),
-        config=CreateConfig(
-            int8=True,
-            calibrator=calibrator,
-            sparse_weights=not args.is_dense_calibration
-        )
+        config=CreateConfig(int8=True, calibrator=calibrator, sparse_weights=not args.is_dense_calibration),
     )
 
     # Trigger engine saving
